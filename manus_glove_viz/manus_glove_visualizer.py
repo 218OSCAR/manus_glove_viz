@@ -14,20 +14,62 @@ import numpy as np
 
 
 
-def rotate_quaternion_z_minus_90(qx, qy, qz, qw):
-    """Rotate quaternion by -90 degrees around Z axis."""
-    rw = 0.70710678
-    rx = 0.0
-    ry = 0.0
-    rz = -0.70710678
+# def rotate_quaternion_z_minus_90(qx, qy, qz, qw):
+#     """Rotate quaternion by -90 degrees around Z axis."""
+#     rw = 0.70710678
+#     rx = 0.0
+#     ry = 0.0
+#     rz = -0.70710678
 
-    # quaternion multiplication: q_new = rot * q_old
-    new_w = rw*qw - rx*qx - ry*qy - rz*qz
-    new_x = rw*qx + rx*qw + ry*qz - rz*qy
-    new_y = rw*qy - rx*qz + ry*qw + rz*qx
-    new_z = rw*qz + rx*qy - ry*qx + rz*qw
+#     # quaternion multiplication: q_new = rot * q_old
+#     new_w = rw*qw - rx*qx - ry*qy - rz*qz
+#     new_x = rw*qx + rx*qw + ry*qz - rz*qy
+#     new_y = rw*qy - rx*qz + ry*qw + rz*qx
+#     new_z = rw*qz + rx*qy - ry*qx + rz*qw
 
-    return new_x, new_y, new_z, new_w
+#     return new_x, new_y, new_z, new_w
+
+def quat_mul(ax, ay, az, aw, bx, by, bz, bw):
+    """Quaternion multiplication: q = a * b"""
+    qx = aw*bx + ax*bw + ay*bz - az*by
+    qy = aw*by - ax*bz + ay*bw + az*bx
+    qz = aw*bz + ax*by - ay*bx + az*bw
+    qw = aw*bw - ax*bx - ay*by - az*bz
+    return qx, qy, qz, qw
+
+def rotate_quaternion_z(qx, qy, qz, qw, degrees):
+    """Rotate quaternion by degrees around Z axis (pre-multiply)."""
+    rad = np.deg2rad(degrees)
+    rz = np.sin(rad / 2.0)
+    rw = np.cos(rad / 2.0)
+    # rot = (0,0,rz,rw)
+    return quat_mul(0.0, 0.0, rz, rw, qx, qy, qz, qw)
+
+def rotate_point_z(x, y, z, degrees):
+    """Rotate point by degrees around Z axis."""
+    rad = np.deg2rad(degrees)
+    c = np.cos(rad)
+    s = np.sin(rad)
+    xr = c*x - s*y
+    yr = s*x + c*y
+    return xr, yr, z
+
+def rotate_quaternion_x(qx, qy, qz, qw, degrees):
+    rad = np.deg2rad(degrees)
+    rx = np.sin(rad / 2.0)
+    rw = np.cos(rad / 2.0)
+    # rot = (rx,0,0,rw)
+    return quat_mul(qx, qy, qz, qw, rx, 0.0, 0.0, rw) 
+
+def rotate_point_x(x, y, z, degrees):
+    rad = np.deg2rad(degrees)
+    c = np.cos(rad)
+    s = np.sin(rad)
+    yr = c*y - s*z
+    zr = s*y + c*z
+    return x, yr, zr
+
+
 
 class ManusGloveVisualizer(Node):
     def __init__(self):
@@ -50,7 +92,50 @@ class ManusGloveVisualizer(Node):
         # TF broadcaster for both palms
         self.tf_broadcaster = TransformBroadcaster(self)
 
+        # -------- Mount option --------
+        # top  : tracker mounted above the glove (current behavior)
+        # left : tracker mounted on the left of the glove -> rotate glove +90deg about Z before attaching
+        self.declare_parameter("mount", "top")
+        self.mount = self.get_parameter("mount").get_parameter_value().string_value.lower()
+        if self.mount not in ("top", "left"):
+            self.get_logger().warn(f"Unknown mount='{self.mount}', fallback to 'top'")
+            self.mount = "top"
+        self.get_logger().info(f"Mount mode: {self.mount}")
+
+
         self.get_logger().info("Manus Glove Visualizer with TF + Correct Right/Left Fix started.")
+
+    def transform_pose_into_tracker_frame(self, x, y, z, qx, qy, qz, qw):
+        # ----- (A) your current base fix -----
+        # original:
+        # y = -y
+        # x_new = y ; y_new = -x ; z_new = z
+        y = -y
+        x_new = y
+        y_new = -x
+        z_new = z
+
+        # quaternion: your current -90deg about Z
+        qx2, qy2, qz2, qw2 = rotate_quaternion_z(qx, qy, qz, qw, -90.0)
+
+        # ----- (B) mount option -----
+        # if tracker is mounted on the LEFT, rotate glove +90deg about Z before attaching
+        # if self.mount == "left":
+        #     x_new, y_new, z_new = rotate_point_z(x_new, y_new, z_new, +90.0)
+        #     qx2, qy2, qz2, qw2 = rotate_quaternion_z(qx2, qy2, qz2, qw2, +90.0)
+        if self.mount == "left":
+
+            # Step 1: already did Z rotation above
+            x_new, y_new, z_new = rotate_point_z(x_new, y_new, z_new, +90.0)
+            qx2, qy2, qz2, qw2 = rotate_quaternion_z(qx2, qy2, qz2, qw2, +90.0)
+
+            # Step 2: rotate position around rotated X
+            x_new, y_new, z_new = rotate_point_x(x_new, y_new, z_new, -90.0)
+
+            # Step 3: rotate quaternion around local X
+            qx2, qy2, qz2, qw2 = rotate_quaternion_x(qx2, qy2, qz2, qw2, -90.0)
+
+        return x_new, y_new, z_new, qx2, qy2, qz2, qw2
 
     # ---------------------------
     # Color coding by glove_id
@@ -79,11 +164,29 @@ class ManusGloveVisualizer(Node):
         else:
             t.child_frame_id = "manus/left_palm"
 
-        t.transform.translation.x = palm.pose.position.x
-        t.transform.translation.y = palm.pose.position.y
-        t.transform.translation.z = palm.pose.position.z
+        # t.transform.translation.x = palm.pose.position.x
+        # t.transform.translation.y = palm.pose.position.y
+        # t.transform.translation.z = palm.pose.position.z
 
-        t.transform.rotation = palm.pose.orientation
+        # t.transform.rotation = palm.pose.orientation
+        x = palm.pose.position.x
+        y = palm.pose.position.y
+        z = palm.pose.position.z
+        qx = palm.pose.orientation.x
+        qy = palm.pose.orientation.y
+        qz = palm.pose.orientation.z
+        qw = palm.pose.orientation.w
+
+        x2, y2, z2, qx2, qy2, qz2, qw2 = self.transform_pose_into_tracker_frame(x, y, z, qx, qy, qz, qw)
+
+        t.transform.translation.x = x2
+        t.transform.translation.y = y2
+        t.transform.translation.z = z2
+
+        t.transform.rotation.x = qx2
+        t.transform.rotation.y = qy2
+        t.transform.rotation.z = qz2
+        t.transform.rotation.w = qw2
 
         self.tf_broadcaster.sendTransform(t)
 
@@ -112,29 +215,49 @@ class ManusGloveVisualizer(Node):
             new_node.chain_type = node.chain_type
 
             # --- Translation transform ---
-            x = node.pose.position.x
-            y = -node.pose.position.y
-            z = node.pose.position.z
 
-            x_new = y
-            y_new = -x
-            z_new = z
+            # x = node.pose.position.x
+            # y = -node.pose.position.y
+            # z = node.pose.position.z
 
-            new_node.pose.position.x = x_new
-            new_node.pose.position.y = y_new
-            new_node.pose.position.z = z_new
+            # x_new = y
+            # y_new = -x
+            # z_new = z
+
+            # new_node.pose.position.x = x_new
+            # new_node.pose.position.y = y_new
+            # new_node.pose.position.z = z_new
 
             
-            # new_node.pose.orientation.x = node.pose.orientation.x
-            # new_node.pose.orientation.y = node.pose.orientation.y
-            # new_node.pose.orientation.z = node.pose.orientation.z
-            # new_node.pose.orientation.w = node.pose.orientation.w
+            # # new_node.pose.orientation.x = node.pose.orientation.x
+            # # new_node.pose.orientation.y = node.pose.orientation.y
+            # # new_node.pose.orientation.z = node.pose.orientation.z
+            # # new_node.pose.orientation.w = node.pose.orientation.w
+            # qx = node.pose.orientation.x
+            # qy = node.pose.orientation.y
+            # qz = node.pose.orientation.z
+            # qw = node.pose.orientation.w
+
+            # qx2, qy2, qz2, qw2 = rotate_quaternion_z_minus_90(qx, qy, qz, qw)
+
+            # new_node.pose.orientation.x = qx2
+            # new_node.pose.orientation.y = qy2
+            # new_node.pose.orientation.z = qz2
+            # new_node.pose.orientation.w = qw2
+
+            x = node.pose.position.x
+            y = node.pose.position.y
+            z = node.pose.position.z
             qx = node.pose.orientation.x
             qy = node.pose.orientation.y
             qz = node.pose.orientation.z
             qw = node.pose.orientation.w
 
-            qx2, qy2, qz2, qw2 = rotate_quaternion_z_minus_90(qx, qy, qz, qw)
+            x2, y2, z2, qx2, qy2, qz2, qw2 = self.transform_pose_into_tracker_frame(x, y, z, qx, qy, qz, qw)
+
+            new_node.pose.position.x = x2
+            new_node.pose.position.y = y2
+            new_node.pose.position.z = z2
 
             new_node.pose.orientation.x = qx2
             new_node.pose.orientation.y = qy2
@@ -221,15 +344,22 @@ class ManusGloveVisualizer(Node):
             y = -node.pose.position.y
             z = node.pose.position.z
 
-            x_new = y
-            y_new = -x
-            z_new = z
+            # x_new = y
+            # y_new = -x
+            # z_new = z
 
-            p = Point(
-                x = x_new,
-                y = y_new,
-                z = z_new
-            )
+            # p = Point(
+            #     x = x_new,
+            #     y = y_new,
+            #     z = z_new
+            # )
+            x = node.pose.position.x
+            y = node.pose.position.y
+            z = node.pose.position.z
+            # marker points don't need quaternion, pass dummy quat
+            x2, y2, z2, _, _, _, _ = self.transform_pose_into_tracker_frame(x, y, z, 0.0, 0.0, 0.0, 1.0)
+
+            p = Point(x=x2, y=y2, z=z2)
 
             nodes.points.append(p)
             node_pos[node.node_id] = p
